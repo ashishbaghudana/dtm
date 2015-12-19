@@ -5,6 +5,9 @@ from gensim.models.wrappers.dtmmodel import DtmModel
 import numpy as np
 import glob
 from nltk.corpus import stopwords
+import xml.etree.ElementTree as ET
+import pickle
+from progress.bar import Bar
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -19,22 +22,53 @@ class DocumentReader:
         self.documents = []
         self.time_seq = []
 
-    def read(self, input_directory):
-        input_files = glob.glob(os.path.join(input_directory, '*.txt'))
-        for article in input_files:
-            with open(article) as f:
-                text = f.read()
-                document = self.parse(text)
-                self.documents.append(document)
-        self.time_seq.append(len(input_files))
+    def read_dir(self, input_directory):
+        """
+        The directory consists of XML files that are annotated specifically for
+        speeches. Each XML file corresponds to the list of speeches in one
+        month.
 
-    def parse(self, text):
-        all_words = text.split()
-        stop_words = stopwords.words('english')
-        stoplist = set('for a of the and to in'.split())
-        words = [word.decode('UTF-8', 'ignore').lower() for word in all_words if word.lower() not in stop_words]
-        return words
+        Every speech is contained in the XML tag <speech id='...'><p></p><speech>
+        This information is extracted out of the XML tags by using the builtin
+        module 'xml.etree.ElementTree'
+        """
+        input_files = glob.glob(os.path.join(input_directory, '*.xml'))
+        bar = Bar('Parsing XML Files', max=len(input_files), suffix='%(percent)d%%')
+        for debates in input_files:
+            bar.next()
+            self.parse(debates)
+        bar.finish()
 
+    def parse(self, debates):
+        """
+        Parse the content of each XML file to separate each speech and process
+        it individually. Only if a month has more than 100 speeches it is
+        recorded.
+        """
+        tree = ET.parse(debates)
+        root = tree.getroot()
+        count = 0
+        documents = []
+        for child in root:
+            if child.tag == 'speech':
+                if len(child)>0:
+                    text = child[0].text
+                    if text is not None:
+                        count += 1
+                        document = self.tokenize(text)
+                        documents.append(document)
+        if count>100:
+            self.documents += documents
+            self.time_seq.append(count)
+
+    def tokenize(self, content):
+        """
+        Tokenization according to Wikipedia corpus, where any token less than 2
+        characters long and greater than 15 characters long is ignored. The
+        token must not start with '_'.
+        """
+        return [token.encode('utf8') for token in utils.tokenize(content, lower=True, errors='ignore')
+                if 2 <= len(token) <= 15 and not token.startswith('_')]
 
 class DTMcorpus(corpora.textcorpus.TextCorpus):
     """
@@ -60,27 +94,32 @@ class DTM:
 
     def create_model(self):
         self.model = DtmModel(self.dtm_path, self.corpus, self.time_seq,
-            num_topics=5, id2word=self.corpus.dictionary, initialize_lda=True)
+            num_topics=15, id2word=self.corpus.dictionary, initialize_lda=True)
         return self.model
 
 def main():
     # read input directories
     reader = DocumentReader()
-    reader.read('../corpus/month1')
-    reader.read('../corpus/month2')
-    reader.read('../corpus/month3')
+    reader.read_dir('/home/ashish/Projects/data')
 
     # create corpus from Documents
     corpus = DTMcorpus(reader.documents)
 
+    # remove extremes
+    corpus.dictionary.filter_extremes(no_below=20, no_above=0.05, keep_n=100000)
+
+    # set output file and save corpus to file - do I need this?
+    # outp = 'bnc_corpus'
+    # corpora.MmCorpus.serialize(outp + '_bow.mm', corpus, progress_cnt=10000) # another ~9h
+    # wiki.dictionary.save_as_text(outp + '_wordids.txt.bz2')
+
     # set DTM path
-    dtm_path = '../bin/dtm'
+    dtm_path = '/home/ashish/Projects/dtm'
     dtm = DTM(dtm_path, corpus, reader.time_seq)
     model = dtm.create_model()
 
-    # print topics
-    topics = model.show_topic(topicid=1, time=1, topn=10)
-    print topics
+    with open('/home/ashish/Projects/model', 'wb') as fout:
+        pickle.dump(model, fout)
 
 if __name__ == '__main__':
     main()
